@@ -138,7 +138,7 @@ impl<T: ?Sized> BaseArc<T> {
     }
 
     pub fn strong_count(&self) -> usize {
-        self.header().count.load(Ordering::Relaxed)
+        self.header().count.load(Ordering::Acquire)
     }
 
     /// Convert a pointer to managed `BaseArc`.
@@ -256,7 +256,7 @@ impl<T: ?Sized> Arc<T> {
     }
 
     pub fn strong_count(&self) -> usize {
-        self.header().count.load(Ordering::Relaxed)
+        self.header().count.load(Ordering::Acquire)
     }
 
     /// Convert raw pointer to a managed `Arc`.
@@ -461,11 +461,11 @@ macro_rules! arc_traits {
                 fn drop(&mut self) {
                     let header = self.header();
 
-                    if header.count.fetch_sub(1, Ordering::Relaxed) != 1 {
+                    if header.count.fetch_sub(1, Ordering::Release) != 1 {
                         return;
                     }
 
-                    fence(Ordering::Acquire);
+                    fence(Ordering::SeqCst);
 
                     unsafe { (header.drop)(self.as_original_ptr::<()>() as *mut ()) }
                 }
