@@ -43,24 +43,52 @@ struct ArcHeader {
     drop: unsafe extern "C" fn(*mut ()),
 }
 
+pub type DropInPlace = Option<unsafe extern "C" fn(*mut ())>;
+
+#[repr(C)]
+struct DynArcHeader {
+    size: usize,
+    alignment: usize,
+    drop_in_place: DropInPlace,
+    hdr: ArcHeader,
+}
+
 unsafe extern "C" fn do_drop<T>(data: *mut ()) {
     core::ptr::drop_in_place(data as *mut T);
     let (header, layout) = layout::<T>();
     dealloc((data as *mut u8).sub(header), layout);
 }
 
+unsafe extern "C" fn do_drop_in_place<T>(data: *mut ()) {
+    core::ptr::drop_in_place(data as *mut T);
+}
+
+unsafe extern "C" fn do_dyn_drop(data: *mut ()) {
+    let header = (data as *mut DynArcHeader).sub(1);
+    let layout = Layout::from_size_align_unchecked((*header).size, (*header).alignment);
+
+    if let Some(drop_fn) = (*header).drop_in_place {
+        drop_fn(data);
+    }
+
+    dealloc(header as *mut u8, layout);
+}
+
 fn layout<T>() -> (usize, Layout) {
-    let alignment = core::cmp::max(
-        core::mem::align_of::<T>(),
-        core::mem::align_of::<ArcHeader>(),
-    );
-    let header_size = core::mem::size_of::<ArcHeader>();
+    header_layout::<DynArcHeader>(unsafe {
+        Layout::from_size_align_unchecked(core::mem::size_of::<T>(), core::mem::align_of::<T>())
+    })
+}
+
+fn header_layout<H>(inp: Layout) -> (usize, Layout) {
+    let alignment = core::cmp::max(inp.align(), core::mem::align_of::<H>());
+    let header_size = core::mem::size_of::<H>();
 
     // Alignment is always a power of two, thus bitwise ops are valid
     let align_up = |val| (val + (alignment - 1)) & !(alignment - 1);
 
     let header_aligned = align_up(header_size);
-    let size = header_aligned + align_up(core::mem::size_of::<T>());
+    let size = header_aligned + align_up(inp.size());
 
     // SAFETY: left half and right half of the size calculation are multiple of alignment
     let layout = unsafe { Layout::from_size_align_unchecked(size, alignment) };
@@ -71,6 +99,9 @@ fn layout<T>() -> (usize, Layout) {
 unsafe fn allocate<T>() -> NonNull<T> {
     let (header, layout) = layout::<T>();
     let data = alloc(layout).add(header);
+
+    assert!(!data.is_null());
+
     NonNull::new_unchecked(data as *mut T)
 }
 
@@ -99,6 +130,52 @@ unsafe fn initialize<T>(data: NonNull<T>, val: T) {
 #[repr(transparent)]
 pub struct BaseArc<T: ?Sized> {
     data: NonNull<T>,
+}
+
+impl BaseArc<()> {
+    /// Create a custom Arc.
+    ///
+    /// This function allows to create a custom dynamically sized arc with custom cleanup routine.
+    ///
+    /// Note that the contents of the created arc are uninitialized.
+    ///
+    /// # Arguments
+    ///
+    /// - `layout` - size and alignment of the object being created.
+    /// - `drop_in_place` - optional cleanup routine to be invoked on upon releasing the arc.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if it fails to allocate enough data for the arc.
+    ///
+    /// # Safety
+    ///
+    /// Technically only correct `drop_in_place` implementation needs to be provided. That means,
+    /// the caller must ensure that `drop_in_place` releases the contents of the initialized arc
+    /// (after it has been returned from this function to the caller), correctly. If `None` is
+    /// passed as the cleanup routine, this function should be safe.
+    pub unsafe fn custom(layout: Layout, drop_in_place: DropInPlace) -> Self {
+        let (header, layout) = header_layout::<DynArcHeader>(layout);
+        let data = alloc(layout);
+
+        assert!(!data.is_null());
+
+        let hdr = data as *mut DynArcHeader;
+
+        hdr.write(DynArcHeader {
+            size: layout.size(),
+            alignment: layout.align(),
+            drop_in_place,
+            hdr: ArcHeader {
+                count: AtomicUsize::new(1),
+                drop: do_dyn_drop,
+            },
+        });
+
+        let data = NonNull::new_unchecked(data.add(header).cast());
+
+        Self { data }
+    }
 }
 
 impl<T> BaseArc<T> {
@@ -141,10 +218,6 @@ impl<T: ?Sized> BaseArc<T> {
         unsafe { &*((self.data.as_ptr() as *mut u8) as *mut ArcHeader).sub(1) }
     }
 
-    pub fn strong_count(&self) -> usize {
-        self.header().count.load(Ordering::Acquire)
-    }
-
     /// Convert a pointer to managed `BaseArc`.
     ///
     /// # Safety
@@ -160,10 +233,6 @@ impl<T: ?Sized> BaseArc<T> {
         let ret = self.data.as_ptr() as *const _;
         core::mem::forget(self);
         ret
-    }
-
-    pub fn as_ptr(&self) -> *const T {
-        self.data.as_ptr() as *const _
     }
 
     /// Increment the strong reference count
@@ -259,10 +328,6 @@ impl<T: ?Sized> Arc<T> {
         unsafe { &*((self.data.as_ptr() as *mut u8).sub(self.offset) as *mut ArcHeader).sub(1) }
     }
 
-    pub fn strong_count(&self) -> usize {
-        self.header().count.load(Ordering::Acquire)
-    }
-
     /// Convert raw pointer to a managed `Arc`.
     ///
     /// # Safety
@@ -282,10 +347,6 @@ impl<T: ?Sized> Arc<T> {
         let offset = self.offset;
         core::mem::forget(self);
         (ret, offset)
-    }
-
-    pub fn as_ptr(&self) -> *const T {
-        self.data.as_ptr() as *const _
     }
 
     /// Increment the strong reference count.
@@ -382,6 +443,29 @@ macro_rules! doc {
 
 macro_rules! arc_traits {
     ($mname:ident, $ty:ident) => {
+
+        impl<T> $ty<T> {
+            pub fn strong_count(&self) -> usize {
+                self.header().count.load(Ordering::Acquire)
+            }
+
+            pub fn as_ptr(&self) -> *const T {
+                self.data.as_ptr() as *const _
+            }
+
+            pub fn exclusive_ptr(&self) -> Option<NonNull<T>> {
+                if self.strong_count() == 1 {
+                    Some(self.data)
+                } else {
+                    None
+                }
+            }
+
+            pub fn get_mut(&mut self) -> Option<&mut T> {
+                self.exclusive_ptr().map(|v| unsafe { &mut *v.as_ptr() })
+            }
+        }
+
         mod $mname {
             use super::*;
             impl<T: Default> Default for $ty<T> {
