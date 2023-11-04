@@ -174,7 +174,7 @@ impl BaseArc<()> {
             },
         });
 
-        let data = NonNull::new_unchecked(data.add(header).cast());
+        let data = NonNull::new_unchecked(data.add(header) as *mut _);
 
         Self { data }
     }
