@@ -15,6 +15,8 @@ use alloc::alloc::{alloc, dealloc};
 use core::alloc::Layout;
 use core::marker::Unpin;
 use core::pin::Pin;
+#[cfg(not(feature = "std"))]
+use core::prelude::rust_2018::*;
 use core::ptr::NonNull;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 #[cfg(feature = "std")]
