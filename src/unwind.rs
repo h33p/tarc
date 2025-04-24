@@ -1,11 +1,9 @@
 use super::*;
 
-pub type DropFn = unsafe extern "C-unwind" fn(*mut ());
+pub type DropFnUnwind = unsafe extern "C-unwind" fn(*mut ());
 
-#[cfg(feature = "unwind")]
-pub type DropInPlaceUnwind = Option<DropFn>;
+pub type DropInPlaceUnwind = Option<DropFnUnwind>;
 
-#[cfg(feature = "unwind")]
 pub mod drops {
     use super::*;
     pub unsafe extern "C-unwind" fn do_drop<T>(data: *mut ()) {
@@ -16,11 +14,16 @@ pub mod drops {
     }
 }
 
-#[cfg(feature = "unwind")]
 impl DropFunc for DropInPlaceUnwind {
     unsafe fn invoke(self, data: *mut ()) {
         if let Some(drop_fn) = self {
             drop_fn(data);
         }
+    }
+}
+
+impl DropFunc for DropFnUnwind {
+    unsafe fn invoke(self, data: *mut ()) {
+        self(data)
     }
 }

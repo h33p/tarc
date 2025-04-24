@@ -1,6 +1,6 @@
 [package]
 name = "tarc"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2018"
 authors = ["Aurimas Blažulionis <0x60@pm.me>"]
 license = "MIT"

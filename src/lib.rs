@@ -27,8 +27,10 @@ mod unwind;
 #[cfg(feature = "unwind")]
 use unwind::*;
 
+#[cfg(feature = "unwind")]
+type DropFnDefault = DropFnUnwind;
 #[cfg(not(feature = "unwind"))]
-type DropFn = unsafe extern "C" fn(*mut ());
+type DropFnDefault = DropFn;
 
 /// An opaque handle.
 #[repr(transparent)]
@@ -50,10 +52,11 @@ impl<T: ?Sized> From<BaseArc<T>> for Handle {
 #[repr(C)]
 struct ArcHeader {
     count: AtomicUsize,
-    drop: DropFn,
+    drop: DropFnDefault,
 }
 
-pub type DropInPlace = Option<unsafe extern "C" fn(*mut ())>;
+pub type DropFn = unsafe extern "C" fn(*mut ());
+pub type DropInPlace = Option<DropFn>;
 
 #[cfg(not(feature = "unwind"))]
 pub type DropInPlaceDefault = DropInPlace;
@@ -72,6 +75,22 @@ mod sealed {
             if let Some(drop_fn) = self {
                 drop_fn(data);
             }
+        }
+    }
+
+    impl DropFunc for DropFn {
+        unsafe fn invoke(self, data: *mut ()) {
+            self(data)
+        }
+    }
+
+    impl DropFunc for () {
+        unsafe fn invoke(self, _: *mut ()) {}
+    }
+
+    impl<T: Sized> DropFunc for unsafe fn(*mut T) {
+        unsafe fn invoke(self, data: *mut ()) {
+            self(data as *mut T)
         }
     }
 }
@@ -179,6 +198,8 @@ impl BaseArc<()> {
     ///
     /// Note that the contents of the created arc are uninitialized.
     ///
+    ///
+    ///
     /// # Arguments
     ///
     /// - `layout` - size and alignment of the object being created.
@@ -194,7 +215,7 @@ impl BaseArc<()> {
     /// the caller must ensure that `drop_in_place` releases the contents of the initialized arc
     /// (after it has been returned from this function to the caller), correctly. If `None` is
     /// passed as the cleanup routine, this function should be safe.
-    pub unsafe fn custom<T: DropFunc>(layout: Layout, drop_in_place: T) -> Self {
+    pub unsafe fn new_custom<T: DropFunc>(layout: Layout, drop_in_place: T) -> Self {
         let (header, layout) = header_layout::<DynArcHeader<T>>(layout);
         let data = alloc(layout);
 
@@ -215,6 +236,11 @@ impl BaseArc<()> {
         let data = NonNull::new_unchecked(data.add(header) as *mut _);
 
         Self { data }
+    }
+
+    #[deprecated = "Use new_custom"]
+    pub unsafe fn custom(layout: Layout, drop_in_place: DropInPlace) -> Self {
+        Self::new_custom(layout, drop_in_place)
     }
 }
 
