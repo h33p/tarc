@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-11, ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         toolchain: ["1.33.0", "stable"]
     steps:
       - uses: actions/checkout@v2
@@ -28,7 +28,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-11, ubuntu-latest, windows-latest]
+        os: [macos-14, ubuntu-latest, windows-latest]
         toolchain: ["1.73.0", "stable"]
     steps:
       - uses: actions/checkout@v2
@@ -45,8 +45,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-11, ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         toolchain: ["1.33.0", "stable", "nightly-2023-02-24"]
+        include:
+          - os: macos-14
+            toolchain: "stable"
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -55,10 +58,10 @@ jobs:
           override: true
 
       - name: Build
-        run: cargo build --all-features --verbose
+        run: cargo build ${{ matrix.toolchain == 'stable' && '--all-features' || '' }} --verbose
 
       - name: Build examples
-        run: cargo build --all-features --examples --verbose
+        run: cargo build ${{ matrix.toolchain == 'stable' && '--all-features' || '' }} --examples --verbose
 
   build-cross-aarch64:
     runs-on: ubuntu-latest
@@ -82,8 +85,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-11, ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         toolchain: ["1.33.0", "stable"]
+        include:
+          - os: macos-14
+            toolchain: "stable"
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -98,8 +104,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-11, ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         toolchain: ["1.33.0", "stable", "nightly-2023-02-24"]
+        include:
+          - os: macos-14
+            toolchain: "stable"
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -108,7 +117,7 @@ jobs:
           override: true
 
       - name: Run all tests
-        run: cargo test --all-features --verbose
+        run: cargo test ${{ matrix.toolchain == 'stable' && '--all-features' || '' }} --verbose
 
   lint:
     runs-on: ubuntu-latest

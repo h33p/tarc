@@ -22,6 +22,14 @@ use core::sync::atomic::{fence, AtomicUsize, Ordering};
 #[cfg(feature = "std")]
 use std::alloc::{alloc, dealloc};
 
+#[cfg(feature = "unwind")]
+mod unwind;
+#[cfg(feature = "unwind")]
+use unwind::*;
+
+#[cfg(not(feature = "unwind"))]
+type DropFn = unsafe extern "C" fn(*mut ());
+
 /// An opaque handle.
 #[repr(transparent)]
 pub struct Handle(BaseArc<()>);
@@ -42,42 +50,72 @@ impl<T: ?Sized> From<BaseArc<T>> for Handle {
 #[repr(C)]
 struct ArcHeader {
     count: AtomicUsize,
-    drop: unsafe extern "C" fn(*mut ()),
+    drop: DropFn,
 }
 
 pub type DropInPlace = Option<unsafe extern "C" fn(*mut ())>;
 
+#[cfg(not(feature = "unwind"))]
+pub type DropInPlaceDefault = DropInPlace;
+#[cfg(feature = "unwind")]
+pub type DropInPlaceDefault = DropInPlaceUnwind;
+
+mod sealed {
+    use super::*;
+
+    pub trait DropFunc: Copy {
+        unsafe fn invoke(self, data: *mut ());
+    }
+
+    impl DropFunc for DropInPlace {
+        unsafe fn invoke(self, data: *mut ()) {
+            if let Some(drop_fn) = self {
+                drop_fn(data);
+            }
+        }
+    }
+}
+
+use sealed::DropFunc;
+
 #[repr(C)]
-struct DynArcHeader {
+struct DynArcHeader<T> {
     size: usize,
     alignment: usize,
-    drop_in_place: DropInPlace,
+    drop_in_place: T,
     hdr: ArcHeader,
 }
 
-unsafe extern "C" fn do_drop<T>(data: *mut ()) {
+unsafe fn do_drop_impl<T>(data: *mut ()) {
     core::ptr::drop_in_place(data as *mut T);
     let (header, layout) = layout::<T>();
     dealloc((data as *mut u8).sub(header), layout);
 }
 
-unsafe extern "C" fn do_drop_in_place<T>(data: *mut ()) {
-    core::ptr::drop_in_place(data as *mut T);
-}
-
-unsafe extern "C" fn do_dyn_drop(data: *mut ()) {
-    let header = (data as *mut DynArcHeader).sub(1);
+unsafe fn do_dyn_drop_impl<T: DropFunc>(data: *mut ()) {
+    let header = (data as *mut DynArcHeader<T>).sub(1);
     let layout = Layout::from_size_align_unchecked((*header).size, (*header).alignment);
 
-    if let Some(drop_fn) = (*header).drop_in_place {
-        drop_fn(data);
-    }
+    (*header).drop_in_place.invoke(data);
 
     dealloc(header as *mut u8, layout);
 }
 
+#[cfg(not(feature = "unwind"))]
+mod drops {
+    use super::*;
+    pub unsafe extern "C" fn do_drop<T>(data: *mut ()) {
+        super::do_drop_impl::<T>(data)
+    }
+    pub unsafe extern "C" fn do_dyn_drop<T: DropFunc>(data: *mut ()) {
+        super::do_dyn_drop_impl::<T>(data)
+    }
+}
+
+use drops::*;
+
 fn layout<T>() -> (usize, Layout) {
-    header_layout::<DynArcHeader>(unsafe {
+    header_layout::<DynArcHeader<DropInPlaceDefault>>(unsafe {
         Layout::from_size_align_unchecked(core::mem::size_of::<T>(), core::mem::align_of::<T>())
     })
 }
@@ -156,13 +194,13 @@ impl BaseArc<()> {
     /// the caller must ensure that `drop_in_place` releases the contents of the initialized arc
     /// (after it has been returned from this function to the caller), correctly. If `None` is
     /// passed as the cleanup routine, this function should be safe.
-    pub unsafe fn custom(layout: Layout, drop_in_place: DropInPlace) -> Self {
-        let (header, layout) = header_layout::<DynArcHeader>(layout);
+    pub unsafe fn custom<T: DropFunc>(layout: Layout, drop_in_place: T) -> Self {
+        let (header, layout) = header_layout::<DynArcHeader<T>>(layout);
         let data = alloc(layout);
 
         assert!(!data.is_null());
 
-        let hdr = data as *mut DynArcHeader;
+        let hdr = data as *mut DynArcHeader<T>;
 
         hdr.write(DynArcHeader {
             size: layout.size(),
@@ -170,7 +208,7 @@ impl BaseArc<()> {
             drop_in_place,
             hdr: ArcHeader {
                 count: AtomicUsize::new(1),
-                drop: do_dyn_drop,
+                drop: do_dyn_drop::<T>,
             },
         });
 
@@ -446,7 +484,7 @@ macro_rules! doc {
 macro_rules! arc_traits {
     ($mname:ident, $ty:ident) => {
 
-        impl<T> $ty<T> {
+        impl<T: ?Sized> $ty<T> {
             pub fn strong_count(&self) -> usize {
                 self.header().count.load(Ordering::Acquire)
             }
